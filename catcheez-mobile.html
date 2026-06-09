@@ -1060,12 +1060,24 @@ renderMarket();renderIpo();renderTrade();renderAccount();renderResults();tickIpo
       if (!el.parentNode) document.body.appendChild(el);
     } catch (e) {}
   }
+  function fmtUsdc(n) { try { return Number(n).toLocaleString('en-US'); } catch (e) { return String(n); } }
+  function refreshBalance() {
+    if (!getToken()) return;
+    getJSON('/me/wallet').then(function (w) {
+      var el = document.getElementById('balv');
+      if (el && w && w.usdcBalance != null) el.textContent = fmtUsdc(w.usdcBalance);
+    }).catch(function () {});
+  }
   function renderAuth(user) {
     try {
+      var balEl = document.querySelector('.bal');
+      var bar = balEl ? balEl.parentNode : null;
       var btn = document.getElementById('cz-auth') || document.createElement('button'); btn.id = 'cz-auth';
-      btn.style.cssText = 'position:fixed;right:10px;top:10px;z-index:10000;font:600 12px/1 ui-sans-serif,system-ui;padding:8px 12px;border:none;border-radius:999px;cursor:pointer;color:#0d0d0f;background:#ffb300;box-shadow:0 2px 8px rgba(0,0,0,.25);';
+      // ロゴ横（appbar）に並ぶピル。固定配置はしない。
+      btn.style.cssText = 'font:600 12px/1 ui-sans-serif,system-ui;padding:8px 13px;border:none;border-radius:999px;cursor:pointer;margin-left:auto;color:#0d0d0f;background:#ffb300;box-shadow:0 1px 4px rgba(0,0,0,.2);';
       var p = user || jwtPayload();
-      if (getToken() && p) {
+      var loggedIn = !!(getToken() && p);
+      if (loggedIn) {
         var w = (p.wallet || p.handle || '').toString();
         var short = w.length > 10 ? w.slice(0, 4) + '…' + w.slice(-4) : w;
         btn.textContent = short + '  ⏏';
@@ -1076,7 +1088,18 @@ renderMarket();renderIpo();renderTrade();renderAccount();renderResults();tickIpo
         btn.onclick = signInWithPhantom;
         btn.style.background = '#ffb300'; btn.style.color = '#0d0d0f';
       }
-      if (!btn.parentNode) document.body.appendChild(btn);
+      // ボタンをロゴ横へ配置（無ければ body）
+      if (bar) { if (btn.parentNode !== bar) bar.appendChild(btn); }
+      else if (!btn.parentNode) document.body.appendChild(btn);
+      // 残高バッジ: ログイン後のみ右上に表示し、実残高に更新
+      if (balEl) {
+        if (loggedIn) {
+          balEl.style.position = 'fixed'; balEl.style.right = '10px'; balEl.style.top = '10px'; balEl.style.zIndex = '10000'; balEl.style.display = '';
+          refreshBalance();
+        } else {
+          balEl.style.display = 'none';
+        }
+      }
     } catch (e) {}
   }
 
