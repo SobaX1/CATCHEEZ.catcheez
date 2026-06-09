@@ -1195,7 +1195,10 @@ renderMarket();renderIpo();renderTrade();renderAccount();renderResults();tickIpo
       var raised = (typeof f.raisedUsdc === 'number') ? f.raisedUsdc : null;
       var goal = f.goalUsdc, pct = f.pct;
       if (dispGoal && raised != null) { goal = dispGoal; pct = Math.min(999, Math.round((raised / dispGoal) * 100)); }
-      return { nm: f.name, tk: f.ticker, col: f.color, left: f.deadlineText, deadline: f.deadline, status: f.status, goal: goal, pct: pct, ticket: f.minTicket, h: f.holders };
+      // 締切は deadline(日付) を単一ソースにし、テキスト(left)も日付から生成して全画面で一致させる
+      var leftTxt = f.deadlineText;
+      if (f.deadline) { var dms = Date.parse(f.deadline); if (!isNaN(dms)) leftTxt = '残り ' + fmtCD(dms - Date.now()); }
+      return { nm: f.name, tk: f.ticker, col: f.color, left: leftTxt, deadline: f.deadline, status: f.status, goal: goal, pct: pct, ticket: f.minTicket, h: f.holders };
     });
   }
   function mapTokens(a) { return a.map(function (t) { return { nm: t.name, tk: t.ticker, by: t.creator, time: t.listedText, col: t.color, mc: t.mcap, chg: t.change24h, h: t.holders, bond: t.bondingPct, price: t.price }; }); }
