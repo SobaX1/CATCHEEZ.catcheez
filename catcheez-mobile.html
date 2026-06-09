@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
+<script>window.CATCHEEZ_API = 'https://catcheez-backend.onrender.com/api';</script>
+
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
 <title>Catcheez — モバイル</title>
@@ -947,6 +949,164 @@ document.getElementById("q").addEventListener("input",function(e){q=e.target.val
 
 /* ---------- init ---------- */
 renderMarket();renderIpo();renderTrade();renderAccount();renderResults();tickIpo();setInterval(tickIpo,1000);
+</script>
+
+<!-- ===== Catcheez API + Auth integration v2 (added, non-destructive) ===== -->
+<script>
+/* ============================================================
+ * Catcheez — フロント ↔ API 連携 + 認証レイヤ v2（追加方式・非破壊）
+ * ------------------------------------------------------------
+ * - 起動時にライブデータを取得して window グローバルを差し替え→再描画
+ * - Phantom で Sign-In with Solana（nonce→ed25519署名→/auth/verify→JWT）
+ * - JWT を localStorage に保持し、全 API 呼び出しに Authorization: Bearer を付与
+ * - API 不通時は埋め込みモックのまま（● MOCK）。右上にウォレット接続ボタン。
+ * 接続先: ?api= / window.CATCHEEZ_API / 既定 http://localhost:4000/api
+ * ============================================================ */
+(function () {
+  'use strict';
+
+  var API = (function () {
+    try { var q = new URLSearchParams(location.search).get('api'); if (q) return q.replace(/\/+$/, ''); } catch (e) {}
+    if (window.CATCHEEZ_API) return String(window.CATCHEEZ_API).replace(/\/+$/, '');
+    return 'http://localhost:4000/api';
+  })();
+
+  /* ---------- token store ---------- */
+  var TKEY = 'catcheez_jwt';
+  function getToken() { try { return localStorage.getItem(TKEY) || null; } catch (e) { return null; } }
+  function setToken(t) { try { if (t) localStorage.setItem(TKEY, t); else localStorage.removeItem(TKEY); } catch (e) {} }
+  function authHeader() { var t = getToken(); return t ? { authorization: 'Bearer ' + t } : {}; }
+  function jwtPayload() {
+    var t = getToken(); if (!t) return null;
+    try { return JSON.parse(decodeURIComponent(escape(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))))); }
+    catch (e) { return null; }
+  }
+  function notify(msg) { try { if (typeof window.toast === 'function') window.toast(msg); else console.log('[catcheez]', msg); } catch (e) {} }
+
+  /* ---------- HTTP（Bearer 自動付与） ---------- */
+  function getJSON(path) {
+    return fetch(API + path, { headers: Object.assign({ accept: 'application/json' }, authHeader()) })
+      .then(function (r) { if (!r.ok) throw new Error(path + ' -> ' + r.status); return r.json(); });
+  }
+  function postJSON(path, body) {
+    return fetch(API + path, { method: 'POST', headers: Object.assign({ 'content-type': 'application/json' }, authHeader()), body: JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.message || (path + ' -> ' + r.status)); return j; }); });
+  }
+
+  /* ---------- base58（署名のエンコード用・依存なし） ---------- */
+  var B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function bs58Encode(bytes) {
+    if (!bytes || bytes.length === 0) return '';
+    var digits = [0], i, j;
+    for (i = 0; i < bytes.length; i++) {
+      var carry = bytes[i];
+      for (j = 0; j < digits.length; j++) { carry += digits[j] << 8; digits[j] = carry % 58; carry = (carry / 58) | 0; }
+      while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+    }
+    var str = '';
+    for (var k = 0; k < bytes.length && bytes[k] === 0; k++) str += '1';
+    for (var q = digits.length - 1; q >= 0; q--) str += B58[digits[q]];
+    return str;
+  }
+
+  /* ---------- Sign-In with Solana (Phantom) ---------- */
+  function getProvider() {
+    var p = window.solana || (window.phantom && window.phantom.solana);
+    return p && p.isPhantom ? p : null;
+  }
+  async function signInWithPhantom() {
+    var provider = getProvider();
+    if (!provider) { notify('Phantom が見つかりません'); try { window.open('https://phantom.app/', '_blank'); } catch (e) {} return; }
+    try {
+      var resp = await provider.connect();
+      var wallet = (resp && resp.publicKey ? resp.publicKey : provider.publicKey).toString();
+      var nr = await postJSON('/auth/nonce', { wallet });
+      var signed = await provider.signMessage(new TextEncoder().encode(nr.message), 'utf8');
+      var signature = bs58Encode(signed.signature);
+      var vr = await postJSON('/auth/verify', { wallet, signature, nonce: nr.nonce });
+      if (vr.token) { setToken(vr.token); renderAuth(vr.user); notify('ログインしました'); boot(); }
+    } catch (e) { notify('ログイン失敗: ' + (e && e.message ? e.message : e)); }
+  }
+  function signOut() { setToken(null); renderAuth(null); notify('ログアウトしました'); boot(); }
+
+  /* ---------- API → フロント形状マッパ ---------- */
+  function mapFunds(a) { return a.map(function (f) { return { nm: f.name, tk: f.ticker, col: f.color, left: f.deadlineText, goal: f.goalUsdc, pct: f.pct, ticket: f.minTicket, h: f.holders }; }); }
+  function mapTokens(a) { return a.map(function (t) { return { nm: t.name, tk: t.ticker, by: t.creator, time: t.listedText, col: t.color, mc: t.mcap, chg: t.change24h, h: t.holders, bond: t.bondingPct, price: t.price }; }); }
+  function mapHoldings(a) { return a.map(function (h) { return { tk: h.ticker, col: h.color, nm: h.name, amt: h.amount, val: h.valueUsdc, chg: h.change24h }; }); }
+  function mapTiers(a) { return a.map(function (t) { return { id: t.id, nm: t.name, sub: t.sub, price: t.price, mult: t.mult, col: t.color, rec: !!t.recommended }; }); }
+  function mapTx(a) { return a.map(function (x) { var s = x.amount < 0 ? '-' : '+'; return { t: x.type, s: x.detail, ic: x.icon, amt: s + '$' + Math.abs(x.amount), up: !!x.up }; }); }
+  function mapLottery(res) {
+    var m = res.meta || {}, you = res.you || {};
+    var out = { col: res.color,
+      meta: [['抽選日時', m.drawnAt], ['VRF 当選率', m.vrfWinRate], ['参加者', (m.participants != null ? m.participants.toLocaleString() : '') + ' 人'], ['当選枠', m.winnersSlots]],
+      you: { status: you.status, nums: you.ticketNumbers || [] },
+      winners: (res.winners || []).map(function (w) { return [w.no, w.tier, w.color, w.textColor, w.holder, w.card, w.result, !!w.isMe]; }) };
+    if (you.card) out.you.card = { nm: you.card.name, grade: you.card.grade, val: you.card.refValue };
+    if (you.refund) out.you.refund = you.refund;
+    return out;
+  }
+  function rerender() {
+    ['renderMarket', 'renderIpo', 'renderTrade', 'renderAccount', 'renderResults'].forEach(function (fn) {
+      try { if (typeof window[fn] === 'function') window[fn](); } catch (e) { console.warn('[catcheez] re-render', fn, e); }
+    });
+  }
+
+  /* ---------- UI: 接続バッジ + ログインボタン ---------- */
+  function badge(ok) {
+    try {
+      var el = document.getElementById('cz-conn') || document.createElement('div'); el.id = 'cz-conn';
+      el.textContent = ok ? '● LIVE' : '● MOCK';
+      el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:9999;font:600 10px/1 ui-monospace,monospace;padding:4px 7px;border-radius:6px;color:#fff;opacity:.55;pointer-events:none;background:' + (ok ? '#15a657' : '#6b7280') + ';';
+      if (!el.parentNode) document.body.appendChild(el);
+    } catch (e) {}
+  }
+  function renderAuth(user) {
+    try {
+      var btn = document.getElementById('cz-auth') || document.createElement('button'); btn.id = 'cz-auth';
+      btn.style.cssText = 'position:fixed;right:10px;top:10px;z-index:10000;font:600 12px/1 ui-sans-serif,system-ui;padding:8px 12px;border:none;border-radius:999px;cursor:pointer;color:#0d0d0f;background:#ffb300;box-shadow:0 2px 8px rgba(0,0,0,.25);';
+      var p = user || jwtPayload();
+      if (getToken() && p) {
+        var w = (p.wallet || p.handle || '').toString();
+        var short = w.length > 10 ? w.slice(0, 4) + '…' + w.slice(-4) : w;
+        btn.textContent = short + '  ⏏';
+        btn.onclick = signOut;
+        btn.style.background = '#26a69a'; btn.style.color = '#fff';
+      } else {
+        btn.textContent = 'ウォレット接続';
+        btn.onclick = signInWithPhantom;
+        btn.style.background = '#ffb300'; btn.style.color = '#0d0d0f';
+      }
+      if (!btn.parentNode) document.body.appendChild(btn);
+    } catch (e) {}
+  }
+
+  /* ---------- boot ---------- */
+  function boot() {
+    renderAuth(null);
+    Promise.all([getJSON('/funds'), getJSON('/tokens'), getJSON('/me/holdings'), getJSON('/me/transactions')]).then(function (r) {
+      var funds = (r[0] && r[0].funds) || [], tiers = (r[0] && r[0].tiers) || [];
+      if (typeof window.ipos !== 'undefined') window.ipos = mapFunds(funds);
+      if (typeof window.live !== 'undefined') window.live = mapTokens((r[1] && r[1].tokens) || []);
+      if (typeof window.holdings !== 'undefined') window.holdings = mapHoldings((r[2] && r[2].holdings) || []);
+      if (typeof window.tx !== 'undefined') window.tx = mapTx((r[3] && r[3].transactions) || []);
+      if (typeof window.TIERS !== 'undefined' && tiers.length) window.TIERS = mapTiers(tiers);
+      return Promise.all(funds.map(function (f) {
+        return getJSON('/funds/' + f.ticker + '/lottery').then(function (l) { return { tk: f.ticker, res: l.result }; }).catch(function () { return null; });
+      })).then(function (lots) {
+        if (typeof window.resData !== 'undefined') lots.filter(Boolean).forEach(function (x) { window.resData[x.tk] = mapLottery(x.res); });
+        rerender(); badge(true);
+        console.log('[catcheez] LIVE from', API, getToken() ? '(authed)' : '(demo)');
+      });
+    }).catch(function (e) { badge(false); console.warn('[catcheez] API unreachable, embedded mock:', e && e.message); });
+  }
+
+  // 外部から叩けるように公開（テスト/フロント連携用）
+  window.catcheezAuth = { signIn: signInWithPhantom, signOut: signOut, getToken: getToken, bs58Encode: bs58Encode, boot: boot };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
+
 </script>
 </body>
 </html>
